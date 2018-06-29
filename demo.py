@@ -12,6 +12,7 @@ sys.setdefaultencoding('utf-8')
 conf = SparkConf().setMaster("local").setAppName("My App")  
 sc = SparkContext(conf = conf)
 testRDD = sc.textFile('datas/test.dne')
+#testRDD = sc.textFile('datas/ED.dne')
 wordRDD = testRDD.flatMap(lambda line: line.split()).distinct()
 
 topN = 10  # Show at most top 10 candidates
@@ -35,11 +36,12 @@ def look4Coll(ptoken, etoken):
     if ptoken:
         if ptoken.startswith('+') or ptoken.startswith('-'):
             ptoken = ptoken[1:]
+
     
-    if ptoken:
-        print("Look for collocation: '{} {}'...".format(ptoken, etoken))
-    else:
-        print("Look for collocation: '^{}'...".format(etoken))
+    #if ptoken:
+    #    print("Look for collocation: '{} {}'...".format(ptoken, etoken))
+    #else:
+    #    print("Look for collocation: '^{}'...".format(etoken))
 
     def filterPtoken(token_line):
         token_list = token_line.split()
@@ -56,7 +58,9 @@ def look4Coll(ptoken, etoken):
             for i in xrange(token_list_len):
                 token = token_list[i].encode('utf-8')
                 if token == ptoken and i+1 < token_list_len:
-                    return ((token, token_list[i+1].encode('utf-8')), 1) 
+                    #print("{} {}".format(token,  token_list[i+1].encode('utf-8')))
+                    return ((token, token_list[i+1].encode('utf-8')), 1)
+        return ((ptoken, None), 0) 
 
     def b2s(sent):
         bs_list = []
@@ -82,9 +86,17 @@ def look4Coll(ptoken, etoken):
     def filterSimUp(e):
         t = e[0]
         s = e[1]
-        return sim_of_token(etoken, t[1]) >= 0.5
+        if t[1] is not None:
+            return sim_of_token(etoken, t[1]) >= 0.5
+        else:
+            return False
 
-    rstRDD = testRDD.filter(filterPtoken).map(collCheck).reduceByKey(lambda a, b: a + b).filter(filterSimUp)
+    tmpRDD = testRDD.filter(filterPtoken)
+    if tmpRDD.count() > 0:
+        rstRDD = tmpRDD.map(collCheck).reduceByKey(lambda a, b: a + b).filter(filterSimUp)
+    else:
+        rstRDD = None
+
     return rstRDD
 
 
@@ -108,12 +120,12 @@ def tokenCheck(token_line):
             #print('\tToken={}({}) is found...(pi={})'.format(token, token_len, pi))
             if pi > 0:                
                 #print('Add missing {}'.format(sent[0:pi]))
-		hc += 1	
+                hc += 1	
                 result_token_list.append("*{}".format(sent[0:pi]))
                 result_token_list.append("+{}".format(token))
                 sent = sent[pi+token_len:]
             else:
-		hc += 2
+                hc += 2
                 result_token_list.append("+{}".format(token))
                 sent = sent[pi+token_len:]
 
@@ -203,18 +215,20 @@ def tokenize(sub_line):
 # MAIN
 ########################
 trtRDD = testRDD.map(tokenCheck).reduceByKey(lambda a, b: a + b).filter(lambda e: e[1] > 0)
-print("Candidate number={}...".format(trtRDD.count()))
+print("Candidate number={:,d}...".format(trtRDD.count()))
 candi_list = []
-for t, v in sorted(trtRDD.collect(), key=lambda e: e[1], reverse=True):
+coll_cache_dict = {}
+for t, score in sorted(trtRDD.collect(), key=lambda e: e[1], reverse=True):
     k = t[0].encode('utf-8')    
     final_token_list = []
-    ptoken = None 
+    ptoken = None
+    #print("Precheck {}...v={}".format(k, score)) 
     for token in k.split():
         dtoken = token.encode('utf-8')
         if dtoken.startswith('*'):
             ctoken = dtoken[1:]
             if isTokenSeen(ctoken):
-                v += 0.5
+                score += 0.5
                 final_token_list.append("~{}".format(ctoken))
                 ptoken = ctoken
             else:
@@ -223,25 +237,36 @@ for t, v in sorted(trtRDD.collect(), key=lambda e: e[1], reverse=True):
                     #print('\tRetokenize {} ({}): \'{}\''.format(ctoken, len(ctoken), ' '.join(sub_token_list)))
                     if sub_token_list:
                         #print('\t{}->{}'.format(token, sub_token_list))
-                        v += len(sub_token_list) * 0.5
+                        score += len(sub_token_list) * 0.5
                         final_token_list.extend(sub_token_list)
                         ptoken = ctoken
                         continue
 
                 # Check collocation suggestion
                 #print("Look for collocation...")
-                collRDD = look4Coll(ptoken, ctoken)
-                for st, v in sorted(collRDD.collect(), key=lambda e: e[1], reverse=True):
-                    if t[0] is None:
-                        print('\tDo you mean "{}"?'.format(st[1]))
-                    else:
-                        print('\tDo you mean "{} {}"?'.format(st[0], st[1]))
+                if (ptoken, ctoken) in coll_cache_dict:
+                    collRDD = coll_cache_dict[(ptoken, ctoken)]
+                else:
+                    collRDD = look4Coll(ptoken, ctoken)
+                    coll_cache_dict[(ptoken, ctoken)] = collRDD
+
+                try:
+                    if collRDD:
+                        for st, v in sorted(collRDD.collect(), key=lambda e: e[1], reverse=True):
+                            if t[0] is None:
+                                print('\tDo you mean "{}" -> "{}"?'.format(ctoken, st[1]))
+                            else:
+                                print('\tDo you mean "{} {}" -> "{} {}"?'.format(ptoken, ctoken, st[0], st[1]))
+                except:
+                    raise
+
                 final_token_list.append(token)
         else:           
             final_token_list.append(token)
             ptoken = token       
 
-    candi_list.append(((final_token_list, t[1].encode('utf-8')), v))
+    #print("Final {}...v={}".format(k, score))
+    candi_list.append(((final_token_list, t[1].encode('utf-8')), score))
 
 candi_list = sorted(candi_list, key=lambda e: e[1], reverse=True)
 ci = 0
