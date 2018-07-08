@@ -13,9 +13,9 @@ sys.setdefaultencoding('utf-8')
 ########################
 conf = SparkConf().setMaster("local").setAppName("My App")  
 sc = SparkContext(conf = conf)
+#testRDD = sc.textFile('datas/test.dne')
 testRDD = sc.textFile('datas/test.dne')
-#testRDD = sc.textFile('datas/UN.dne')
-wordRDD = testRDD.flatMap(lambda line: line.split()).distinct()
+wordRDD = testRDD.flatMap(lambda line: line.split()).distinct().persist()
 
 topN = 1  # Show at most top 10 candidates
 task = 0  # Task ID
@@ -319,7 +319,7 @@ for t, v in candi_list:
     rst = {"tokenized": tokenized_rst, "score":v, "source_sent":source_sent, "collsug":[]}
     ci += 1
     if ci <= topN:
-        #print("Candidate Tokenized Result={} (score={} by '{}')".format(tokenized_rst, v, source_sent))
+        print("Candidate Tokenized Result={} (score={} by '{}')".format(tokenized_rst, v, source_sent))
         ptoken = None
         si = 0
         for token in t[0]:
