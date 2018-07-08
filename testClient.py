@@ -3,19 +3,28 @@
 import json
 import sys
 import requests
+import pprint
+import os
 
-uid='l2'
-key='ntnu'
+server_ip = 'localhost'
+server_port = 5050
+uid=os.environ['HANS_UID']
+key=os.environ['HANS_KEY']
 sent='以目前鼓本估算'
 
 if len(sys.argv) > 1:
     sent = sys.argv[1]
 
-resp = requests.post('http://localhost:5050/query', json={'uid':uid, 'key':key, 'sent':sent})
+data = {'uid':uid, 'key':key, 'sent':sent} 
+resp = requests.post('http://{}:{}/query'.format(server_ip, server_port), json=data)
+print("Sending data:\n{}\n\n".format(pprint.pformat(data, indent=4)))
+print("="*50)
 
 print("Resp status={}".format(resp.status_code))
 if resp.status_code == 200:
     resp_json = json.loads(resp.text)
+    print("Receiving data:\n{}\n\n".format(pprint.pformat(resp_json, indent=4)))
+    print("="*50)
     r'''
     {
         "rst_list": [
@@ -34,6 +43,7 @@ if resp.status_code == 200:
         "sentence": "\u4ee5\u76ee\u524d\u9f13\u672c\u4f30\u7b97"
     }
     '''
+    print("Parsing Result:")
     rst = resp_json['rst_list'][0]
     print("\tTokenized result: {}".format(rst['tokenized'].encode('utf-8')))
     if len(rst['collsug']) > 0:
