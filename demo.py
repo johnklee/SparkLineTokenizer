@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*- 
 from pyspark import SparkConf, SparkContext 
 import sys
+import json
+import re
 print("The Python version is %s.%s.%s" % sys.version_info[:3])
 reload(sys) 
 sys.setdefaultencoding('utf-8') 
@@ -12,15 +14,16 @@ sys.setdefaultencoding('utf-8')
 conf = SparkConf().setMaster("local").setAppName("My App")  
 sc = SparkContext(conf = conf)
 testRDD = sc.textFile('datas/test.dne')
-#testRDD = sc.textFile('datas/ED.dne')
+#testRDD = sc.textFile('datas/UN.dne')
 wordRDD = testRDD.flatMap(lambda line: line.split()).distinct()
 
-topN = 10  # Show at most top 10 candidates
+topN = 1  # Show at most top 10 candidates
+task = 0  # Task ID
 
 if len(sys.argv) > 1:
     target_sent = sys.argv[1].encode('utf-8')
     if len(sys.argv) > 2:
-        topN = int(sys.argv[2])
+        task = int(sys.argv[2])
 else:
     target_sent = '今天還是要去公司'.encode('utf-8')
 
@@ -28,13 +31,18 @@ else:
 ########################
 # APIs
 ########################
+def length(sent):
+    sent = sent.decode('utf-8')
+
+    return len(sent)
+
 def look4Coll(ptoken, etoken):
     r'''
     Look for collocaton from previous token as <ptoken> and 
     current error token as <etoken>
     '''
     if ptoken:
-        if ptoken.startswith('+') or ptoken.startswith('-'):
+        if ptoken.startswith('+') or ptoken.startswith('-') or ptoken.startswith('~'):
             ptoken = ptoken[1:]
 
     
@@ -46,7 +54,10 @@ def look4Coll(ptoken, etoken):
     def filterPtoken(token_line):
         token_list = token_line.split()
         encode_token_list = map(lambda t: t.encode('utf-8'), token_list)
-        return ptoken in encode_token_list
+        if ptoken:
+            return ptoken in encode_token_list
+        else:
+            return len(set(etoken) & set(encode_token_list[0])) > 0
     
     def collCheck(token_line):
         token_list = token_line.split()
@@ -91,13 +102,16 @@ def look4Coll(ptoken, etoken):
         else:
             return False
 
-    tmpRDD = testRDD.filter(filterPtoken)
-    if tmpRDD.count() > 0:
-        rstRDD = tmpRDD.map(collCheck).reduceByKey(lambda a, b: a + b).filter(filterSimUp)
-    else:
-        rstRDD = None
+    if ptoken:
+        tmpRDD = testRDD.filter(filterPtoken)
+        if tmpRDD.count() > 0:
+            rstRDD = tmpRDD.map(collCheck).reduceByKey(lambda a, b: a + b).filter(filterSimUp)
+        else:
+            rstRDD = None
 
-    return rstRDD
+        return rstRDD
+    else:
+        return testRDD.map(collCheck).reduceByKey(lambda a, b: a + b).filter(filterSimUp)
 
 
 def isTokenSeen(token):
@@ -115,8 +129,20 @@ def tokenCheck(token_line):
     for token in token_list:
         token = token.encode('utf-8')
         token_len = len(token)
+        #print("Sent={}; token={}".format(sent, token))
         try:
-            pi = sent.index(token)
+            if token.startswith('r:'):
+                mth = re.search(token[2:], sent)
+                if mth:
+                    token = mth.group(0)
+                    token_len = len(token)
+                    pi = sent.index(token)
+                    #print('Sent={}; token={}; pi={}'.format(sent, token, pi))
+                else:
+                    raise ValueError('Not match')
+            else:
+                pi = sent.index(token)
+
             #print('\tToken={}({}) is found...(pi={})'.format(token, token_len, pi))
             if pi > 0:                
                 #print('Add missing {}'.format(sent[0:pi]))
@@ -150,6 +176,7 @@ def tokenCheck(token_line):
 
 def tokenize(sub_line):
     def _map2Tokenize(token_line):
+        
         token_line = token_line.encode('utf-8')
         sent = sub_line
         #print('sub_line={}'.format(sent))        
@@ -157,10 +184,24 @@ def tokenize(sub_line):
         result_token_list = []
         mc = 0  # Missing count
         hc = 0  # Hit count
-        for token in token_list:            
+        for token in token_list:
+            #print("Sent={}; token={}".format(sent, token))
             token_len = len(token)
             try:
-                pi = sent.index(token)
+                if token.startswith('r:'):
+                    #print('Search ptn={}'.format(token[2:]))
+                    mth = re.search(token[2:], sent)
+                    if mth:
+                        #print('Match ptn={}: {}'.format(token[2:], mth.group(0)))
+                        token = mth.group(0)
+                        token_len = len(token)
+                        pi = sent.index(token)
+                        #print('Sent={}; token={}; pi={}'.format(sent, token, pi))
+                    else:
+                        raise ValueError('Not match')
+                else:
+                    pi = sent.index(token)
+
                 hc += 1
                 if pi > 0:
                     ctoken = sent[0:pi]
@@ -172,6 +213,7 @@ def tokenize(sub_line):
                     result_token_list.append(token)
                     sent = sent[pi+token_len:]
                 else:
+                    hc += 1
                     result_token_list.append(token)
                     sent = sent[pi+token_len:]
 
@@ -221,6 +263,7 @@ coll_cache_dict = {}
 for t, score in sorted(trtRDD.collect(), key=lambda e: e[1], reverse=True):
     k = t[0].encode('utf-8')    
     final_token_list = []
+    suggest_token_list = {}
     ptoken = None
     #print("Precheck {}...v={}".format(k, score)) 
     for token in k.split():
@@ -243,22 +286,21 @@ for t, score in sorted(trtRDD.collect(), key=lambda e: e[1], reverse=True):
                         continue
 
                 # Check collocation suggestion
-                #print("Look for collocation...")
-                if (ptoken, ctoken) in coll_cache_dict:
-                    collRDD = coll_cache_dict[(ptoken, ctoken)]
-                else:
-                    collRDD = look4Coll(ptoken, ctoken)
-                    coll_cache_dict[(ptoken, ctoken)] = collRDD
+                #if (ptoken, ctoken) in coll_cache_dict:
+                #    collRDD = coll_cache_dict[(ptoken, ctoken)]
+                #else:
+                #    collRDD = look4Coll(ptoken, ctoken)
+                #    coll_cache_dict[(ptoken, ctoken)] = collRDD
 
-                try:
-                    if collRDD:
-                        for st, v in sorted(collRDD.collect(), key=lambda e: e[1], reverse=True):
-                            if t[0] is None:
-                                print('\tDo you mean "{}" -> "{}"?'.format(ctoken, st[1]))
-                            else:
-                                print('\tDo you mean "{} {}" -> "{} {}"?'.format(ptoken, ctoken, st[0], st[1]))
-                except:
-                    raise
+                #try:
+                #    if collRDD:
+                #        for st, v in sorted(collRDD.collect(), key=lambda e: e[1], reverse=True):
+                #            if ptoken is None:
+                #                print('\tDo you mean "{}" -> "{}"?'.format(ctoken, st[1]))
+                #            else:
+                #                print('\tDo you mean "{} {}" -> "{} {}"?'.format(ptoken, ctoken, st[0], st[1]))
+                #except:
+                #    raise
 
                 final_token_list.append(token)
         else:           
@@ -268,13 +310,41 @@ for t, score in sorted(trtRDD.collect(), key=lambda e: e[1], reverse=True):
     #print("Final {}...v={}".format(k, score))
     candi_list.append(((final_token_list, t[1].encode('utf-8')), score))
 
+proc_json = {"sentence":target_sent, "rst_list":[]}
 candi_list = sorted(candi_list, key=lambda e: e[1], reverse=True)
 ci = 0
 for t, v in candi_list:
     tokenized_rst = " ".join(t[0])
     source_sent = t[1]
+    rst = {"tokenized": tokenized_rst, "score":v, "source_sent":source_sent, "collsug":[]}
     ci += 1
-    if ci < topN:
-        print("Candidate Tokenized Result={} (score={} by '{}')".format(tokenized_rst, v, source_sent))
+    if ci <= topN:
+        #print("Candidate Tokenized Result={} (score={} by '{}')".format(tokenized_rst, v, source_sent))
+        ptoken = None
+        si = 0
+        for token in t[0]:
+            ctoken = token[1:]
+            #print("Look for {}/{}...({})".format(ctoken, length(ctoken), length(token)))
+            if token.startswith('*'):
+                collRDD = look4Coll(ptoken, ctoken)
+                if collRDD:
+                    csl = {"sp":si, "ep":si+length(ctoken), "org":ctoken, "sug":[]}
+                    hasSug = False
+                    for st, v in sorted(collRDD.collect(), key=lambda e: e[1], reverse=True):
+                        #print("\t{}->{}?".format(ctoken, st[1])) 
+                        csl["sug"].append(st[1])
+                        hasSug = True
+ 
+                    if hasSug:
+                        rst["collsug"].append(csl)
+
+            ptoken = token
+            si += length(ctoken) 
+ 
+        proc_json["rst_list"].append(rst)
     else:
         break
+
+
+with open('/tmp/{}.json'.format(task), 'w') as fw:
+    json.dump(proc_json, fw)
